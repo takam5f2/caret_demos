@@ -22,7 +22,7 @@ int main(int argc, char * argv[]) {
     // --- Node 1: Sensor Simulator ---
     auto sensor_simulator_node = std::make_shared<rclcpp::Node>("sensor_simulator_node");
     auto pub_raw = sensor_simulator_node->create_publisher<sensor_msgs::msg::Image>("/image_raw", 10);
-    auto timer_300ms = sensor_simulator_node->create_wall_timer(300ms, [&](){
+    auto timer_100ms = sensor_simulator_node->create_wall_timer(100ms, [sensor_simulator_node, pub_raw](){
         RCLCPP_INFO(sensor_simulator_node->get_logger(), "[Step 1] Sensor Start: Pub /image_raw (Inter-process) >>>");
         pub_raw->publish(std::make_unique<sensor_msgs::msg::Image>());
     });
@@ -32,7 +32,7 @@ int main(int argc, char * argv[]) {
         "intra_relay_node", rclcpp::NodeOptions().use_intra_process_comms(true));
     auto pub_filtered = intra_relay_node->create_publisher<sensor_msgs::msg::Image>("/image_filtered_intra", 10);
     auto sub_raw = intra_relay_node->create_subscription<sensor_msgs::msg::Image>(
-        "/image_raw", 10, [&](sensor_msgs::msg::Image::UniquePtr msg){
+        "/image_raw", 10, [intra_relay_node, pub_filtered](sensor_msgs::msg::Image::UniquePtr msg){
             RCLCPP_INFO(intra_relay_node->get_logger(),
                 "        [Step 2] Intra Relay: Recv /image_raw -> Pub /image_filtered_intra (Intra-process)");
             pub_filtered->publish(std::move(msg));
@@ -40,37 +40,53 @@ int main(int argc, char * argv[]) {
 
     // --- Node 3: Data Serializer ---
     auto data_serializer_node = std::make_shared<rclcpp::Node>("data_serializer_node");
+    // Generic for take
     auto pub_serialized = data_serializer_node->create_generic_publisher(
         "/image_serialized", "sensor_msgs/msg/Image", 10);
+    // Normal Publisher torigger for take
+    auto pub_trigger = data_serializer_node->create_publisher<sensor_msgs::msg::Image>(
+        "/image_trigger", 10);
+
     auto sub_filtered = data_serializer_node->create_subscription<sensor_msgs::msg::Image>(
-        "/image_filtered_intra", 10, [&](sensor_msgs::msg::Image::UniquePtr msg){
-            RCLCPP_INFO(data_serializer_node->get_logger(),
-                "    [Step 3] Data Serializer: Recv /image_filtered_intra -> Pub Generic /image_serialized");
+        "/image_filtered_intra", 10, 
+        [data_serializer_node, pub_serialized, pub_trigger](sensor_msgs::msg::Image::UniquePtr msg) {
+            // 1. Publish serialized data
             auto ser_msg = std::make_shared<rclcpp::SerializedMessage>();
             rclcpp::Serialization<sensor_msgs::msg::Image> ser;
             ser.serialize_message(msg.get(), ser_msg.get());
             pub_serialized->publish(*ser_msg);
+
+            // 2. Publish normal data (trigger)
+            sensor_msgs::msg::Image trigger_msg;
+            pub_trigger->publish(trigger_msg);
+
+            RCLCPP_INFO(data_serializer_node->get_logger(), "    [Step 3] Data Serializer: Pub Data & Trigger");
         });
 
     // --- Node 4: Generic Relay ---
     auto generic_relay_node = std::make_shared<rclcpp::Node>("generic_relay_node");
     auto pub_relay = generic_relay_node->create_publisher<sensor_msgs::msg::Image>("/image_relay", 10);
-    auto group_relay = generic_relay_node->create_callback_group(
-        rclcpp::CallbackGroupType::MutuallyExclusive, false);
+
+    auto group_relay = generic_relay_node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
     auto opt_relay = rclcpp::SubscriptionOptions();
     opt_relay.callback_group = group_relay;
-    
-    auto sub_data_gen = generic_relay_node->create_generic_subscription(
-        "/image_serialized", "sensor_msgs/msg/Image", 10,
-        [](std::shared_ptr<rclcpp::SerializedMessage>){}, opt_relay);
-    auto sub_trig_gen = generic_relay_node->create_generic_subscription(
-        "/image_serialized", "sensor_msgs/msg/Image", 10, [&](std::shared_ptr<rclcpp::SerializedMessage>){
-            RCLCPP_INFO(generic_relay_node->get_logger(), "      [Step 4] Generic Relay: Triggered by /image_serialized.");
-            auto msg = sub_data_gen->create_serialized_message();
+    // rclcpp::CallbackGroupType::MutuallyExclusive is false
+    auto sub_data_gen = generic_relay_node->create_subscription<sensor_msgs::msg::Image>(
+        "/image_serialized", 10, [](sensor_msgs::msg::Image::UniquePtr){}, opt_relay);
+
+    // trigger
+    auto sub_trig = generic_relay_node->create_subscription<sensor_msgs::msg::Image>(
+        "/image_trigger", 10, 
+        [generic_relay_node, sub_data_gen, pub_relay](sensor_msgs::msg::Image::UniquePtr /*trigger_msg*/) {
+            RCLCPP_INFO(generic_relay_node->get_logger(), "      [Step 4] Generic Relay: Triggered by /image_trigger.");
+
+            auto img_msg = std::make_shared<sensor_msgs::msg::Image>();
             rclcpp::MessageInfo info;
-            if (sub_data_gen->take_serialized(*msg, info)) {
-                RCLCPP_INFO(generic_relay_node->get_logger(), "      [Step 4] SUCCESS: Pub /image_relay");
-                pub_relay->publish(*msg);
+            
+            // take from sub_data_gen
+            if (sub_data_gen->take(*img_msg, info)) {
+                RCLCPP_INFO(generic_relay_node->get_logger(), "      [Step 4] SUCCESS: Take Success & Pub /image_relay");
+                pub_relay->publish(*img_msg);
             }
         });
 
@@ -83,7 +99,7 @@ int main(int argc, char * argv[]) {
     
     auto sub_data_relay = inter_take_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_relay", 10, [](const sensor_msgs::msg::Image::SharedPtr){}, opt_inter);
-    auto timer_150ms = inter_take_node->create_wall_timer(150ms, [inter_take_node, pub_buffered, sub_data_relay](){
+    auto timer_10ms = inter_take_node->create_wall_timer(10ms, [inter_take_node, pub_buffered, sub_data_relay](){
         sensor_msgs::msg::Image msg; rclcpp::MessageInfo info;
         if (sub_data_relay->take(msg, info)) {
             RCLCPP_INFO(inter_take_node->get_logger(),
@@ -128,7 +144,7 @@ int main(int argc, char * argv[]) {
     
     auto sub_data_latched = timer_take_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_transient_local", transient_local_qos, [](const sensor_msgs::msg::Image::SharedPtr){}, opt_timer);
-    auto timer_cons_100ms = timer_take_node->create_wall_timer(200ms, [timer_take_node, pub_final, sub_data_latched](){
+    auto timer_cons_10ms = timer_take_node->create_wall_timer(10ms, [timer_take_node, pub_final, sub_data_latched](){
         auto msg = std::make_shared<sensor_msgs::msg::Image>();
         rclcpp::MessageInfo info;
         if (sub_data_latched->take(*msg, info)) {
