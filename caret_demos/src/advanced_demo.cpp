@@ -5,6 +5,12 @@
 #include <thread>
 
 #include "rclcpp/rclcpp.hpp"
+// for humble
+#if __has_include("rclcpp/serialization.hpp")
+  #include "rclcpp/serialization.hpp"
+  #define IS_HUMBLE_OR_OLDER
+#endif
+
 #include "rclcpp/generic_publisher.hpp"
 #include "rclcpp/generic_subscription.hpp"
 #include "sensor_msgs/msg/image.hpp"
@@ -34,33 +40,29 @@ int main(int argc, char * argv[]) {
     auto sub_raw = intra_relay_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_raw", 10, [intra_relay_node, pub_filtered](sensor_msgs::msg::Image::UniquePtr msg){
             RCLCPP_INFO(intra_relay_node->get_logger(),
-                "        [Step 2] Intra Relay: Recv /image_raw -> Pub /image_filtered_intra (Intra-process)");
+                "         [Step 2] Intra Relay: Recv /image_raw -> Pub /image_filtered_intra (Intra-process)");
             pub_filtered->publish(std::move(msg));
         });
 
     // --- Node 3: Data Serializer ---
     auto data_serializer_node = std::make_shared<rclcpp::Node>("data_serializer_node");
-    // Generic for take
     auto pub_serialized = data_serializer_node->create_generic_publisher(
         "/image_serialized", "sensor_msgs/msg/Image", 10);
-    // Normal Publisher torigger for take
     auto pub_trigger = data_serializer_node->create_publisher<sensor_msgs::msg::Image>(
         "/image_trigger", 10);
 
     auto sub_filtered = data_serializer_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_filtered_intra", 10, 
         [data_serializer_node, pub_serialized, pub_trigger](sensor_msgs::msg::Image::UniquePtr msg) {
-            // 1. Publish serialized data
             auto ser_msg = std::make_shared<rclcpp::SerializedMessage>();
             rclcpp::Serialization<sensor_msgs::msg::Image> ser;
             ser.serialize_message(msg.get(), ser_msg.get());
             pub_serialized->publish(*ser_msg);
 
-            // 2. Publish normal data (trigger)
             sensor_msgs::msg::Image trigger_msg;
             pub_trigger->publish(trigger_msg);
 
-            RCLCPP_INFO(data_serializer_node->get_logger(), "    [Step 3] Data Serializer: Pub Data & Trigger");
+            RCLCPP_INFO(data_serializer_node->get_logger(), "     [Step 3] Data Serializer: Pub Data & Trigger");
         });
 
     // --- Node 4: Generic Relay ---
@@ -70,22 +72,20 @@ int main(int argc, char * argv[]) {
     auto group_relay = generic_relay_node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
     auto opt_relay = rclcpp::SubscriptionOptions();
     opt_relay.callback_group = group_relay;
-    // rclcpp::CallbackGroupType::MutuallyExclusive is false
+    
     auto sub_data_gen = generic_relay_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_serialized", 10, [](sensor_msgs::msg::Image::UniquePtr){}, opt_relay);
 
-    // trigger
     auto sub_trig = generic_relay_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_trigger", 10, 
         [generic_relay_node, sub_data_gen, pub_relay](sensor_msgs::msg::Image::UniquePtr /*trigger_msg*/) {
-            RCLCPP_INFO(generic_relay_node->get_logger(), "      [Step 4] Generic Relay: Triggered by /image_trigger.");
+            RCLCPP_INFO(generic_relay_node->get_logger(), "       [Step 4] Generic Relay: Triggered by /image_trigger.");
 
             auto img_msg = std::make_shared<sensor_msgs::msg::Image>();
             rclcpp::MessageInfo info;
             
-            // take from sub_data_gen
             if (sub_data_gen->take(*img_msg, info)) {
-                RCLCPP_INFO(generic_relay_node->get_logger(), "      [Step 4] SUCCESS: Take Success & Pub /image_relay");
+                RCLCPP_INFO(generic_relay_node->get_logger(), "       [Step 4] SUCCESS: Take Success & Pub /image_relay");
                 pub_relay->publish(*img_msg);
             }
         });
@@ -103,36 +103,56 @@ int main(int argc, char * argv[]) {
         sensor_msgs::msg::Image msg; rclcpp::MessageInfo info;
         if (sub_data_relay->take(msg, info)) {
             RCLCPP_INFO(inter_take_node->get_logger(),
-                "         [Step 5] Inter Take Node: Timer triggered take(/image_relay) -> Pub /image_inter_buffered");
+                "          [Step 5] Inter Take Node: Timer triggered take(/image_relay) -> Pub /image_inter_buffered");
             pub_buffered->publish(msg);
         }
     });
 
     // --- Node 6: Intra Take Node ---
+#ifdef IS_HUMBLE_OR_OLDER
+    auto intra_take_node = std::make_shared<rclcpp::Node>(
+        "intra_take_node", rclcpp::NodeOptions().use_intra_process_comms(false));
+#else
     auto intra_take_node = std::make_shared<rclcpp::Node>(
         "intra_take_node", rclcpp::NodeOptions().use_intra_process_comms(true));
+#endif
+
     auto pub_latched = intra_take_node->create_publisher<sensor_msgs::msg::Image>(
         "/image_transient_local", transient_local_qos);
     auto group_intra = intra_take_node->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
     auto opt_intra = rclcpp::SubscriptionOptions();
     opt_intra.callback_group = group_intra;
+
+#ifndef IS_HUMBLE_OR_OLDER
     ENABLE_INTRA_PROCESS(opt_intra);
+#endif
 
     auto sub_data_intra = intra_take_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_filtered_intra", 10, 
         [pub_latched](const sensor_msgs::msg::Image::SharedPtr msg){ pub_latched->publish(*msg); }, opt_intra);
 
     auto sub_trig_inter = intra_take_node->create_subscription<sensor_msgs::msg::Image>(
-        "/image_inter_buffered", 10, [intra_take_node, sub_data_intra](sensor_msgs::msg::Image::UniquePtr){
+        "/image_inter_buffered", 10, [intra_take_node, sub_data_intra, pub_latched](sensor_msgs::msg::Image::UniquePtr){
             RCLCPP_INFO(intra_take_node->get_logger(),
-                "         [Step 6] Intra Take Node: Topic triggered take(/image_filtered_intra).");
+                "          [Step 6] Intra Take Node: Topic triggered take(/image_filtered_intra).");
+#ifdef IS_HUMBLE_OR_OLDER
+            // Humble path
+            auto img_msg = std::make_shared<sensor_msgs::msg::Image>();
+            rclcpp::MessageInfo info;
+            if (sub_data_intra->take(*img_msg, info)) {
+                RCLCPP_INFO(intra_take_node->get_logger(), "          [Step 6] SUCCESS: Pub /image_transient_local (Inter-process)");
+                pub_latched->publish(*img_msg);
+            }
+#else
+            // Jazzy path
             auto ipw = sub_data_intra->get_intra_process_waitable();
             if (ipw && ipw->is_ready(nullptr)) {
                 auto data = ipw->take_data();
                 if (data && (ipw->execute(data), true)) {
-                    RCLCPP_INFO(intra_take_node->get_logger(), "         [Step 6] SUCCESS: Pub /image_transient_local");
+                    RCLCPP_INFO(intra_take_node->get_logger(), "          [Step 6] SUCCESS: Pub /image_transient_local (Intra-process)");
                 }
             }
+#endif
         });
 
     // --- Node 7: Timer Take Node ---
@@ -149,7 +169,7 @@ int main(int argc, char * argv[]) {
         rclcpp::MessageInfo info;
         if (sub_data_latched->take(*msg, info)) {
             RCLCPP_INFO(timer_take_node->get_logger(),
-                "         [Step 7] Timer Take Node: Timer triggered take(/image_transient_local) -> Pub /image_final");
+                "          [Step 7] Timer Take Node: Timer triggered take(/image_transient_local) -> Pub /image_final");
             pub_final->publish(*msg);
         }
     });
@@ -158,7 +178,7 @@ int main(int argc, char * argv[]) {
     auto dummy_actuator_node = std::make_shared<rclcpp::Node>("dummy_actuator_node");
     auto sub_final = dummy_actuator_node->create_subscription<sensor_msgs::msg::Image>(
         "/image_final", 10, [&](const sensor_msgs::msg::Image::SharedPtr){
-            RCLCPP_INFO(dummy_actuator_node->get_logger(), "     [Step 8] Dummy Actuator: Recv /image_final. Path Complete! <<<");
+            RCLCPP_INFO(dummy_actuator_node->get_logger(), "      [Step 8] Dummy Actuator: Recv /image_final. Path Complete! <<<");
         });
 
     // --- Execution ---
