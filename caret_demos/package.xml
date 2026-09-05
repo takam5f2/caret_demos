@@ -11,6 +11,7 @@
 
   <depend>rclcpp</depend>
   <depend>sensor_msgs</depend>
+  <build_depend condition="$BUILD_AGNOCAST_DEMO == ON">agnocastlib</build_depend>
   <exec_depend>demo_nodes_cpp</exec_depend>
   <exec_depend>intra_process_demo</exec_depend>
   <test_depend>ament_lint_auto</test_depend>
