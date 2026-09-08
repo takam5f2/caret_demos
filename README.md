@@ -38,8 +38,18 @@ colcon build --symlink-install --packages-up-to caret_demos --cmake-args -DBUILD
 
 ### Build with agnocast demo
 
+> **Note**: agnocast must be built with CARET sourced to enable LTTng tracepoints.
+> Without this, agnocast's own build will lack LTTng support.
+> Build agnocast after sourcing CARET (e.g. `source ~/ros2_caret_ws/install/local_setup.bash`),
+> then build caret_demos as shown below.
+
 ```bash
-colcon build --symlink-install --packages-up-to caret_demos --cmake-args -DBUILD_TESTING=OFF -DBUILD_AGNOCAST_DEMO=ON
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_caret_ws/install/local_setup.bash
+source ~/agnocast/install/local_setup.bash
+
+colcon build --symlink-install --packages-up-to caret_demos --cmake-args \
+    -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DBUILD_AGNOCAST_DEMO=ON
 ```
 
 ## Trace Collection (with CARET)
